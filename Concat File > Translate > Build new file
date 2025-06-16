@@ -1,0 +1,232 @@
+/**
+ * This script provides functionality to translate data from the active Google Sheet
+ * into multiple languages, creating a new sheet for each translated language.
+ * Additionally, it saves each translated sheet as a separate Google Sheet file
+ * into a specified Google Drive folder.
+ *
+ * This version uses a batch translation method to minimize API calls to Google Translate,
+ * helping to avoid rate limit errors.
+ *
+ * To use:
+ * 1. Open your Google Sheet.
+ * 2. Go to 'Extensions' > 'Apps Script'.
+ * 3. Delete any existing code and paste this script.
+ * 4. Save the project (File > Save project or Ctrl+S).
+ * 5. Go back to your Google Sheet. A new menu item "Translate" should appear.
+ * 6. Click 'Translate' > 'Translate Sheet Data'.
+ * 7. Authorize the script if prompted.
+ */
+
+/**
+ * onOpen() function: Creates a custom menu in the Google Sheet for easy access to the script.
+ * This function runs automatically when the spreadsheet is opened.
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('Translate')
+      .addItem('Translate Sheet Data', 'translateSheetData')
+      .addToUi();
+}
+
+/**
+ * translateSheetData() function: The main function to perform the translation.
+ * It gets data from the active sheet, translates it into various languages using a
+ * batch method, creates new sheets for each translation, and saves them as separate files.
+ */
+function translateSheetData() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const activeSheet = spreadsheet.getActiveSheet();
+  const ui = SpreadsheetApp.getUi();
+
+  // Define unique delimiters for splitting concatenated data.
+  // These should be highly unlikely to appear in your actual sheet data.
+  const CELL_DELIMITER = '_$$CELL$$_';
+  const ROW_DELIMITER = '_$$ROW$$_';
+
+  // Show a message to the user that the process has started.
+  ui.alert('Translation Started', 'Translating your data in batches and saving to Google Drive. This may take some time...', ui.ButtonSet.OK);
+
+  // Define the source language. Change this if your original data is not in English.
+  const sourceLang = 'en'; // Assuming source data is English
+
+  // Define the target languages and their corresponding Google Translate codes.
+  const targetLanguages = {
+    'Albanian': 'sq',
+    'Bosnian': 'bs',
+    'Bulgarian': 'bg',
+    'Croatian': 'hr',
+    'Czech': 'cs',
+    'Chinese (Mandarin) Simplified': 'zh-CN',
+    'Danish': 'da',
+    'Dutch': 'nl',
+    'Estonian': 'et',
+    'Finnish': 'fi',
+    'French': 'fr',
+    'Greek': 'el',
+    'Hungarian': 'hu',
+    'Italian': 'it',
+    'Latvian': 'lv',
+    'Lithuanian': 'lt',
+    'Macedonian': 'mk',
+    'Portuguese (EU)': 'pt',
+    'Romanian': 'ro',
+    'Serbian (Cyrillic)': 'sr',
+    'Slovak': 'sk',
+    'Slovenian': 'sl',
+    'Spanish (Spain)': 'es',
+    'Swedish': 'sv',
+    'Polish': 'pl'
+  };
+
+  // Define the Google Drive Folder ID where translated files will be saved.
+  const targetFolderId = '12bAQAFAAWZ-mXv_y49-IeqyF9NKo0x1s';
+  let targetFolder;
+
+  try {
+    // Get the target folder by ID.
+    targetFolder = DriveApp.getFolderById(targetFolderId);
+  } catch (e) {
+    ui.alert('Error: Folder Not Found', `Could not find the Google Drive folder with ID: ${targetFolderId}. Please ensure the folder exists and you have access. Error: ${e.message}`, ui.ButtonSet.OK);
+    return;
+  }
+
+  try {
+    // Get all data from the active sheet's used range.
+    const dataRange = activeSheet.getDataRange();
+    const values = dataRange.getValues(); // This is the original 2D array of data
+
+    if (values.length === 0) {
+      ui.alert('No Data Found', 'The active sheet appears to be empty. Please add data to translate.', ui.ButtonSet.OK);
+      return;
+    }
+
+    // Object to store all translated data, keyed by language name
+    const allTranslatedData = {};
+
+    // --- Phase 1: Prepare data for batch translation and perform translations ---
+    ui.alert('Translating...', 'Preparing data for translation and making API calls. This might take a while...', ui.ButtonSet.OK);
+
+    // Concatenate all string values into a single large string for batch translation
+    let concatenatedTextToTranslate = '';
+    const originalCellMap = []; // To store original type and position for re-insertion
+
+    for (let i = 0; i < values.length; i++) {
+      const rowMap = [];
+      for (let j = 0; j < values[i].length; j++) {
+        const cellValue = values[i][j];
+
+        if (typeof cellValue === 'string' && cellValue.trim() !== '') {
+          concatenatedTextToTranslate += cellValue + CELL_DELIMITER;
+          rowMap.push('text'); // Mark as text that was concatenated
+        } else {
+          // For non-string or empty values, just push a placeholder to maintain structure
+          rowMap.push('non-text');
+        }
+      }
+      concatenatedTextToTranslate += ROW_DELIMITER; // Add row delimiter after each row
+      originalCellMap.push(rowMap);
+    }
+
+    // Remove the last ROW_DELIMITER, as it's not needed
+    if (concatenatedTextToTranslate.endsWith(ROW_DELIMITER)) {
+      concatenatedTextToTranslate = concatenatedTextToTranslate.slice(0, -ROW_DELIMITER.length);
+    }
+    
+    // Iterate through each target language to perform batch translation
+    for (const langName in targetLanguages) {
+      if (Object.hasOwnProperty.call(targetLanguages, langName)) {
+        const langCode = targetLanguages[langName];
+        let translatedConcatenatedText = '';
+
+        try {
+          // Perform the single batch translation for this language
+          translatedConcatenatedText = LanguageApp.translate(concatenatedTextToTranslate, sourceLang, langCode);
+          console.log(`Batch translation completed for: ${langName}`);
+
+          // Reconstruct the 2D array from the translated concatenated text
+          const translatedValues = [];
+          const translatedRows = translatedConcatenatedText.split(ROW_DELIMITER);
+
+          for (let i = 0; i < translatedRows.length; i++) {
+            const translatedRow = [];
+            const translatedCells = translatedRows[i].split(CELL_DELIMITER);
+
+            // Match translated cells with original non-text cells
+            for (let j = 0; j < originalCellMap[i].length; j++) {
+              if (originalCellMap[i][j] === 'text') {
+                // Pop the next translated cell. Handle cases where translation might introduce
+                // extra delimiters or the last delimiter might be missing.
+                const cellVal = translatedCells.shift() || ''; // Use shift to consume and get next
+                translatedRow.push(cellVal.trim());
+              } else {
+                translatedRow.push(values[i][j]); // Restore original non-text value
+              }
+            }
+            translatedValues.push(translatedRow);
+          }
+          allTranslatedData[langName] = translatedValues;
+
+        } catch (e) {
+          console.error(`Error performing batch translation for ${langName}: ${e.message}`);
+          // If translation fails for a language, store original values with an error
+          const errorValues = values.map(row => row.map(cell => typeof cell === 'string' && cell.trim() !== '' ? `Translation Error: ${cell}` : cell));
+          allTranslatedData[langName] = errorValues;
+        }
+        Utilities.sleep(100); // Small pause between batch translation calls for different languages
+      }
+    }
+
+    // --- Phase 2: Create new sheets and files with translated data ---
+    ui.alert('Saving Files...', 'Creating new sheets and saving translated data to Google Drive. This may take a while...', ui.ButtonSet.OK);
+    for (const langName in allTranslatedData) {
+      if (Object.hasOwnProperty.call(allTranslatedData, langName)) {
+        const translatedValues = allTranslatedData[langName];
+
+        // 1. Create a new sheet in the original spreadsheet for display
+        let newSheetName = langName;
+        let counter = 1;
+        while (spreadsheet.getSheetByName(newSheetName)) {
+          newSheetName = `${langName} (${counter})`;
+          counter++;
+        }
+        const newSheet = spreadsheet.insertSheet(newSheetName);
+        if (translatedValues.length > 0) {
+          // Ensure the range size matches the data size
+          newSheet.getRange(1, 1, translatedValues.length, translatedValues[0].length).setValues(translatedValues);
+        }
+        console.log(`Created new sheet "${newSheetName}" in the active spreadsheet.`);
+
+        // 2. Create a new standalone spreadsheet file in Google Drive
+        const newFileName = `${langName} Translated Data - ${activeSheet.getName()}`;
+        const newSpreadsheetFile = SpreadsheetApp.create(newFileName);
+        const newSpreadsheetFileId = newSpreadsheetFile.getId();
+
+        // Get the default first sheet of the new standalone spreadsheet.
+        const defaultNewSheet = newSpreadsheetFile.getSheets()[0];
+
+        if (translatedValues.length > 0) {
+          // Copy data to the default sheet of the new standalone spreadsheet.
+          defaultNewSheet.getRange(1, 1, translatedValues.length, translatedValues[0].length).setValues(translatedValues);
+          // Rename the default sheet within the new file to the language name.
+          defaultNewSheet.setName(langName);
+        }
+
+        // Move the newly created spreadsheet file to the target folder.
+        const file = DriveApp.getFileById(newSpreadsheetFileId);
+        targetFolder.addFile(file);
+        // Remove from root folder to keep My Drive clean (optional)
+        DriveApp.getRootFolder().removeFile(file);
+
+        console.log(`Saved "${newFileName}" to folder "${targetFolder.getName()}"`);
+      }
+    }
+
+    // Inform the user that the translation and saving is complete.
+    ui.alert('Translation & Saving Complete', 'Your data has been translated into all specified languages, new sheets created, and separate files saved in your Google Drive folder.', ui.ButtonSet.OK);
+
+  } catch (e) {
+    // Catch any general errors during the process.
+    console.error(`An error occurred during translation or saving: ${e.message}`);
+    ui.alert('Error', `An error occurred during translation or saving: ${e.message}. Please check the Apps Script logs and ensure the folder ID is correct.`, ui.ButtonSet.OK);
+  }
+}
